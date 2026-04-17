@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+python/venv/
+src/stt/transcribe
+*.aiff
+*.wav.tmp
+.DS_Store
