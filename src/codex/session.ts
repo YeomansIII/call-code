@@ -43,10 +43,16 @@ export class CodexSession extends EventEmitter {
   private responseBuffer = "";
   private turnInFlight = false;
   private pendingInputs: string[] = [];
+  private ready = false;
+  private readyPromise: Promise<void>;
+  private resolveReady!: () => void;
 
   constructor() {
     super();
     this.client = new CodexClient(config.codex.cwd);
+    this.readyPromise = new Promise((resolve) => {
+      this.resolveReady = resolve;
+    });
 
     this.client.on("notification", (method: string, params: Record<string, unknown>) => {
       this.handleNotification(method, params);
@@ -77,10 +83,23 @@ export class CodexSession extends EventEmitter {
     })) as { thread: { id: string } };
 
     this.threadId = result.thread.id;
+
+    setTimeout(() => {
+      if (!this.ready) {
+        console.log("[codex] MCP ready timeout, proceeding anyway");
+        this.ready = true;
+        this.resolveReady();
+      }
+    }, 10_000);
+  }
+
+  async waitUntilReady(): Promise<void> {
+    await this.readyPromise;
   }
 
   async sendTurn(text: string): Promise<void> {
     if (!this.threadId) throw new Error("Session not initialized");
+    await this.readyPromise;
 
     if (this.turnInFlight) {
       this.pendingInputs.push(text);
@@ -102,14 +121,27 @@ export class CodexSession extends EventEmitter {
         this.responseBuffer += params.delta as string;
         break;
 
+      case "item/completed":
+        {
+          const item = params.item as { type: string } | undefined;
+          if (item?.type === "agentMessage") {
+            const response = this.responseBuffer;
+            this.responseBuffer = "";
+            if (response.trim()) {
+              this.emit("response", response);
+            }
+          }
+        }
+        break;
+
       case "turn/completed":
         {
-          const response = this.responseBuffer;
+          const leftover = this.responseBuffer;
           this.responseBuffer = "";
           this.turnInFlight = false;
 
-          if (response.trim()) {
-            this.emit("response", response);
+          if (leftover.trim()) {
+            this.emit("response", leftover);
           }
 
           this.drainPending();
@@ -124,6 +156,22 @@ export class CodexSession extends EventEmitter {
             resolution: "acceptForSession",
           })
           .catch(() => {});
+        break;
+
+      case "mcpServer/startupStatus/updated":
+        {
+          const name = params.name as string;
+          const status = params.status as string;
+          console.log(`[codex] MCP server ${name}: ${status}`);
+          if (status === "ready" && name === "codex-peers" && !this.ready) {
+            this.ready = true;
+            this.resolveReady();
+          }
+        }
+        break;
+
+      case "error":
+        console.error(`[codex] Error:`, JSON.stringify(params));
         break;
     }
   }

@@ -23,7 +23,7 @@ export const config = {
     userId: required("DISCORD_USER_ID"),
   },
   codex: {
-    model: optional("CODEX_MODEL", "o4-mini"),
+    model: optional("CODEX_MODEL", "gpt-5.4-nano"),
     cwd: optional("CODEX_CWD", process.cwd()),
   },
   broker: {

@@ -18,6 +18,8 @@ type State = "IDLE" | "LISTENING" | "PROCESSING" | "SPEAKING";
 let state: State = "IDLE";
 let audioChunks: Buffer[] = [];
 let pendingMessages: string[] = [];
+let lastAudioTime = 0;
+let audioGapTimer: ReturnType<typeof setInterval> | null = null;
 
 const CHIME_WAKE = join(__dirname, "../assets/chime-wake.wav");
 const CHIME_PROCESSING = join(__dirname, "../assets/chime-processing.wav");
@@ -60,6 +62,7 @@ async function main() {
     wake.feed(pcm16kMono);
 
     if (state === "LISTENING") {
+      lastAudioTime = Date.now();
       audioChunks.push(pcm16kMono);
       const result = silence.feed(pcm16kMono);
 
@@ -80,6 +83,18 @@ async function main() {
       setState("LISTENING");
       audioChunks = [];
       silence.reset();
+      lastAudioTime = Date.now();
+
+      // Timer for mobile: if no audio packets arrive for 2.5s, treat as silence
+      if (audioGapTimer) clearInterval(audioGapTimer);
+      audioGapTimer = setInterval(() => {
+        if (state === "LISTENING" && Date.now() - lastAudioTime > 2500) {
+          log("Audio gap timeout (mobile client?)");
+          if (audioGapTimer) { clearInterval(audioGapTimer); audioGapTimer = null; }
+          finishListening(voice, codex);
+        }
+      }, 500);
+
       voice.play(CHIME_WAKE).catch(() => {});
     }
   });
@@ -113,7 +128,7 @@ async function main() {
   });
 
   codex.sendTurn(
-    "Greet the user briefly. You just came online. Report how many peers are active if you can."
+    'First, call set_summary with "Jarvis voice assistant — Call Code Discord bot". Then greet the user briefly. You just came online. Report how many peers are active if you can.'
   ).catch((e) => log(`Greeting turn error: ${e}`));
 
   function handleShutdown() {
@@ -126,6 +141,7 @@ async function main() {
 }
 
 async function finishListening(voice: VoiceBridge, codex: CodexSession) {
+  if (audioGapTimer) { clearInterval(audioGapTimer); audioGapTimer = null; }
   setState("PROCESSING");
 
   voice.play(CHIME_PROCESSING).catch(() => {});

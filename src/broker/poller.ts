@@ -1,4 +1,8 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { config } from "../config.ts";
+
+const PEER_ID_DIR = "/tmp/claude-peers";
 
 interface BrokerMessage {
   from_id: string;
@@ -8,9 +12,19 @@ interface BrokerMessage {
 
 interface Peer {
   id: string;
+  pid: number;
   client_kind: string;
   cwd: string;
   summary: string;
+  registered_at: string;
+}
+
+interface PeerIdFile {
+  id: string;
+  pid: number;
+  ppid: number;
+  cwd: string;
+  client_kind: string;
 }
 
 export class BrokerPoller {
@@ -26,27 +40,56 @@ export class BrokerPoller {
 
   async start(): Promise<void> {
     this.peerId = await this.discoverPeerId();
-    console.log(`[broker] Discovered Codex peer ID: ${this.peerId}`);
+    console.log(`[broker] Discovered Jarvis peer ID: ${this.peerId}`);
     this.interval = setInterval(() => this.poll(), config.broker.pollIntervalMs);
   }
 
   private async discoverPeerId(): Promise<string> {
     for (let attempt = 0; attempt < 60; attempt++) {
+      // Method 1: scan registration files for a PPID close to our Codex PID
+      try {
+        const files = readdirSync(PEER_ID_DIR);
+        for (const file of files) {
+          if (!file.endsWith(".json")) continue;
+          try {
+            const data = JSON.parse(
+              readFileSync(join(PEER_ID_DIR, file), "utf-8"),
+            ) as PeerIdFile;
+            // The MCP server's PPID is the Codex child process that spawned it.
+            // It's typically within a few PIDs of our Codex PID.
+            if (
+              data.client_kind === "codex" &&
+              Math.abs(data.ppid - this.codexPid) <= 5
+            ) {
+              return data.id;
+            }
+          } catch {
+            continue;
+          }
+        }
+      } catch {
+        // directory might not exist yet
+      }
+
+      // Method 2: fallback to broker API — find codex peer with PID closest to ours
       try {
         const res = await fetch(`${config.broker.url}/list-peers`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ scope: "machine", cwd: ".", git_root: null }),
         });
-
-        if (!res.ok) throw new Error(`${res.status}`);
-        const peers = (await res.json()) as Peer[];
-
-        const codexPeer = peers.find((p) => p.client_kind === "codex");
-        if (codexPeer) return codexPeer.id;
+        if (res.ok) {
+          const peers = (await res.json()) as Peer[];
+          const codexPeers = peers.filter((p) => p.client_kind === "codex");
+          const nearby = codexPeers.find(
+            (p) => Math.abs(p.pid - this.codexPid) <= 50,
+          );
+          if (nearby) return nearby.id;
+        }
       } catch {
         // broker may not be up yet
       }
+
       await new Promise((r) => setTimeout(r, 1000));
     }
     throw new Error("Failed to discover Codex peer ID after 60 seconds");
@@ -81,6 +124,7 @@ export class BrokerPoller {
         return `[Peer Message] From: ${msg.from_id} (${ctx})\nMessage: "${msg.text}"`;
       });
 
+      console.log(`[broker] ${result.messages.length} peer message(s) received`);
       this.onMessage(lines.join("\n\n"));
     } catch {
       // non-critical
